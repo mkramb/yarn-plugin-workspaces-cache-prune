@@ -7,8 +7,10 @@ import {
   Descriptor,
   IdentHash,
   Manifest,
+  Package,
   Plugin,
   Project,
+  semverUtils,
   structUtils,
   ThrowReport,
   Workspace,
@@ -62,11 +64,15 @@ class WorkspacesCachePruneCommand extends BaseCommand {
     await project.resolveEverything({ cache, report: new ThrowReport() });
     await project.fetchEverything({ cache, report: new ThrowReport() });
 
-    project.forgetVirtualResolutions();
-
     const loadTransitiveDependencies = (dependencies: Map<IdentHash, Descriptor>) => {
       for (const depDescriptor of dependencies.values()) {
-        const depPackage = project.storedPackages.get(project.storedResolutions.get(depDescriptor.descriptorHash));
+        const depDescriptorHash = project.storedResolutions.get(
+          structUtils.isVirtualDescriptor(depDescriptor)
+            ? structUtils.devirtualizeDescriptor(depDescriptor).descriptorHash
+            : depDescriptor.descriptorHash
+        );
+
+        const depPackage = project.storedPackages.get(depDescriptorHash);
         const depPackageSlug = structUtils.slugifyLocator(depPackage);
 
         if (!dependenciesToKeep.has(depPackageSlug)) {
@@ -76,18 +82,35 @@ class WorkspacesCachePruneCommand extends BaseCommand {
       }
     };
 
-    for (const storedPackage of project.storedPackages.values()) {
-      const storedPackageSlug = structUtils.slugifyLocator(storedPackage);
+    for (const requiredWorkspace of requiredWorkspaces) {
+      const workspaceDependencies = requiredWorkspace.manifest.dependencies;
 
-      for (const requiredWorkspace of requiredWorkspaces) {
-        if (requiredWorkspace.manifest.hasDependency(storedPackage)) {
+      for (const [identHash, descriptor] of workspaceDependencies) {
+        let resolvedDependency: Package;
+
+        for (const storedPackage of project.storedPackages.values()) {
+          if (
+            storedPackage.identHash === identHash &&
+            semverUtils.satisfiesWithPrereleases(storedPackage.version, descriptor.range, false)
+          ) {
+            resolvedDependency = storedPackage;
+          }
+        }
+
+        if (resolvedDependency) {
+          const storedPackageSlug = structUtils.slugifyLocator(
+            structUtils.isVirtualLocator(resolvedDependency)
+              ? structUtils.devirtualizeLocator(resolvedDependency)
+              : resolvedDependency
+          );
+
           dependenciesToKeep.set(storedPackageSlug, true);
-          loadTransitiveDependencies(storedPackage.dependencies);
+          loadTransitiveDependencies(resolvedDependency.dependencies);
         }
       }
     }
 
-    // Finally, lets prune cache of items that are not needed
+    // Lastly lets prune cache of items that are not needed
 
     const cacheFiles = readdirSync(cache.cwd);
 
