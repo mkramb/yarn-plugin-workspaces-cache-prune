@@ -94,7 +94,7 @@ class WorkspacesCachePruneCommand extends BaseCommand {
     const cacheFiles = readdirSync(cache.cwd);
 
     for (const fileName of cacheFiles) {
-      const matches = fileName.match(/(.*-npm-.+)-.*/);
+      const matches = fileName.match(/(.*)-.+/);
 
       if (!matches || dependenciesToKeep.get(matches[1]) !== true) {
         unlinkSync(`${cache.cwd}/${fileName}`);

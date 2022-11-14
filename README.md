@@ -20,5 +20,5 @@ yarn workspaces-cache-prune
 As alternative you can provide multiple workspaces as arguments:
 
 ```
-yarn workspaces-cache-prune workspaceA workspaceB workspaceC
+yarn workspaces-cache-prune <workspaceA> <workspaceB> <workspaceC>
 ```
