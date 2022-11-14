@@ -4,6 +4,8 @@ import { BaseCommand, WorkspaceRequiredError } from "@yarnpkg/cli";
 import {
   Cache,
   Configuration,
+  Descriptor,
+  IdentHash,
   Manifest,
   Plugin,
   Project,
@@ -18,14 +20,8 @@ class WorkspacesCachePruneCommand extends BaseCommand {
   workspaces = Option.Rest();
 
   async execute() {
-    const configuration = await Configuration.find(
-      this.context.cwd,
-      this.context.plugins
-    );
-    const { project, workspace } = await Project.find(
-      configuration,
-      this.context.cwd
-    );
+    const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
+    const { project, workspace } = await Project.find(configuration, this.context.cwd);
 
     let requiredWorkspaces: Set<Workspace>;
 
@@ -48,11 +44,8 @@ class WorkspacesCachePruneCommand extends BaseCommand {
 
     for (const workspace of requiredWorkspaces) {
       for (const dependencyType of Manifest.allDependencies) {
-        for (const descriptor of workspace.manifest
-          .getForScope(dependencyType)
-          .values()) {
-          const matchingWorkspace =
-            project.tryWorkspaceByDescriptor(descriptor);
+        for (const descriptor of workspace.manifest.getForScope(dependencyType).values()) {
+          const matchingWorkspace = project.tryWorkspaceByDescriptor(descriptor);
 
           if (matchingWorkspace === null) continue;
           requiredWorkspaces.add(matchingWorkspace);
@@ -64,27 +57,32 @@ class WorkspacesCachePruneCommand extends BaseCommand {
     // and gathering all workspace dependencies
 
     const cache = await Cache.find(configuration);
-    const dependenciesToKeep: Map<string, boolean> = new Map();
+    const dependenciesToKeep: Map<string, true> = new Map();
 
-    await project.resolveEverything({
-      cache,
-      lockfileOnly: true,
-      report: new ThrowReport(),
-    });
+    await project.resolveEverything({ cache, report: new ThrowReport() });
+    await project.fetchEverything({ cache, report: new ThrowReport() });
+
+    project.forgetVirtualResolutions();
+
+    const loadTransitiveDependencies = (dependencies: Map<IdentHash, Descriptor>) => {
+      for (const depDescriptor of dependencies.values()) {
+        const depPackage = project.storedPackages.get(project.storedResolutions.get(depDescriptor.descriptorHash));
+        const depPackageSlug = structUtils.slugifyLocator(depPackage);
+
+        if (!dependenciesToKeep.has(depPackageSlug)) {
+          dependenciesToKeep.set(depPackageSlug, true);
+          loadTransitiveDependencies(depPackage.dependencies);
+        }
+      }
+    };
 
     for (const storedPackage of project.storedPackages.values()) {
-      const isVirtualPackage = structUtils.isVirtualLocator(
-        structUtils.makeLocator(storedPackage, storedPackage.reference)
-      );
+      const storedPackageSlug = structUtils.slugifyLocator(storedPackage);
 
-      if (!isVirtualPackage) {
-        for (const workspace of requiredWorkspaces) {
-          if (workspace.manifest.hasDependency(storedPackage)) {
-            dependenciesToKeep.set(
-              structUtils.slugifyLocator(storedPackage),
-              true
-            );
-          }
+      for (const requiredWorkspace of requiredWorkspaces) {
+        if (requiredWorkspace.manifest.hasDependency(storedPackage)) {
+          dependenciesToKeep.set(storedPackageSlug, true);
+          loadTransitiveDependencies(storedPackage.dependencies);
         }
       }
     }
@@ -101,7 +99,7 @@ class WorkspacesCachePruneCommand extends BaseCommand {
       }
     }
 
-    console.log("Pruned cache for the current workspace.");
+    console.log("Cache pruned for selected workspaces.");
   }
 }
 
