@@ -1,0 +1,15 @@
+{
+  "name": "yarn-plugin-workspaces-cache-prune",
+  "main": "./sources/index.ts",
+  "dependencies": {
+    "@yarnpkg/core": "^4.0.0-rc.28",
+    "@yarnpkg/cli": "^4.0.0-rc.28",
+    "@yarnpkg/builder": "^4.0.0-rc.28",
+    "@types/node": "^14.0.0",
+    "clipanion": "^3.2.0-rc.10",
+    "typescript": "4.9.2-rc"
+  },
+  "scripts": {
+    "build": "builder build plugin"
+  }
+}
