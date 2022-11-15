@@ -1,4 +1,4 @@
-# yarn-workspaces-cache-prune
+# yarn-plugin-workspaces-cache-prune
 
 This plugin adds support for pruning yarn cache items for a given yarn workspace.
 
