@@ -91,7 +91,7 @@ class WorkspacesCachePruneCommand extends BaseCommand {
         for (const storedPackage of project.storedPackages.values()) {
           if (
             storedPackage.identHash === identHash &&
-            semverUtils.satisfiesWithPrereleases(storedPackage.version, descriptor.range, false)
+            semverUtils.satisfiesWithPrereleases(storedPackage.version, descriptor.range)
           ) {
             resolvedDependency = storedPackage;
           }
