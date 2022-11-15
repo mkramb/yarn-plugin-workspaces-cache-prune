@@ -1,36 +1,42 @@
-import { readdirSync, unlinkSync } from "fs";
 import { Option } from "clipanion";
 import { BaseCommand, WorkspaceRequiredError } from "@yarnpkg/cli";
 import {
   Cache,
   Configuration,
-  Descriptor,
-  IdentHash,
   Manifest,
-  Package,
   Plugin,
   Project,
-  semverUtils,
+  StreamReport,
   structUtils,
-  ThrowReport,
   Workspace,
 } from "@yarnpkg/core";
 
 class WorkspacesCachePruneCommand extends BaseCommand {
   static paths = [[`workspaces-cache-prune`]];
 
+  json = Option.Boolean(`--json`, false, {
+    description: `Format the output as an NDJSON stream`,
+  });
+
+  production = Option.Boolean(`--production`, false, {
+    description: `Only install regular dependencies by omitting dev dependencies`,
+  });
+
   workspaces = Option.Rest();
 
   async execute() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
     const { project, workspace } = await Project.find(configuration, this.context.cwd);
+    const cache = await Cache.find(configuration);
+
+    await project.restoreInstallState({
+      restoreResolutions: false,
+    });
 
     let requiredWorkspaces: Set<Workspace>;
 
     if (this.workspaces.length === 0) {
-      if (!workspace) {
-        throw new WorkspaceRequiredError(project.cwd, this.context.cwd);
-      }
+      if (!workspace) throw new WorkspaceRequiredError(project.cwd, this.context.cwd);
 
       requiredWorkspaces = new Set([workspace]);
     } else {
@@ -42,87 +48,56 @@ class WorkspacesCachePruneCommand extends BaseCommand {
     }
 
     // First we compute the dependency chain to see what workspaces are
-    // dependencies of the current one we're trying to focus on.
+    // dependencies of the one we're trying to focus on.
 
     for (const workspace of requiredWorkspaces) {
-      for (const dependencyType of Manifest.allDependencies) {
+      for (const dependencyType of this.production ? [`dependencies`] : Manifest.hardDependencies) {
         for (const descriptor of workspace.manifest.getForScope(dependencyType).values()) {
           const matchingWorkspace = project.tryWorkspaceByDescriptor(descriptor);
 
           if (matchingWorkspace === null) continue;
+
           requiredWorkspaces.add(matchingWorkspace);
         }
       }
     }
 
-    // We continue with resolving project dependencies
-    // and gathering all workspace dependencies
+    // Then we go over each workspace that didn't get selected,
+    // and remove all their dependencies.
 
-    const cache = await Cache.find(configuration);
-    const dependenciesToKeep: Map<string, true> = new Map();
-
-    await project.resolveEverything({ cache, report: new ThrowReport() });
-    await project.fetchEverything({ cache, report: new ThrowReport() });
-
-    const loadTransitiveDependencies = (dependencies: Map<IdentHash, Descriptor>) => {
-      for (const depDescriptor of dependencies.values()) {
-        const depDescriptorHash = project.storedResolutions.get(
-          structUtils.isVirtualDescriptor(depDescriptor)
-            ? structUtils.devirtualizeDescriptor(depDescriptor).descriptorHash
-            : depDescriptor.descriptorHash
-        );
-
-        const depPackage = project.storedPackages.get(depDescriptorHash);
-        const depPackageSlug = structUtils.slugifyLocator(depPackage);
-
-        if (!dependenciesToKeep.has(depPackageSlug)) {
-          dependenciesToKeep.set(depPackageSlug, true);
-          loadTransitiveDependencies(depPackage.dependencies);
+    for (const workspace of project.workspaces) {
+      if (requiredWorkspaces.has(workspace)) {
+        if (this.production) {
+          workspace.manifest.devDependencies.clear();
         }
-      }
-    };
-
-    for (const requiredWorkspace of requiredWorkspaces) {
-      const workspaceDependencies = requiredWorkspace.manifest.dependencies;
-
-      for (const [identHash, descriptor] of workspaceDependencies) {
-        let resolvedDependency: Package;
-
-        for (const storedPackage of project.storedPackages.values()) {
-          if (
-            storedPackage.identHash === identHash &&
-            semverUtils.satisfiesWithPrereleases(storedPackage.version, descriptor.range)
-          ) {
-            resolvedDependency = storedPackage;
-          }
-        }
-
-        if (resolvedDependency) {
-          const storedPackageSlug = structUtils.slugifyLocator(
-            structUtils.isVirtualLocator(resolvedDependency)
-              ? structUtils.devirtualizeLocator(resolvedDependency)
-              : resolvedDependency
-          );
-
-          dependenciesToKeep.set(storedPackageSlug, true);
-          loadTransitiveDependencies(resolvedDependency.dependencies);
-        }
+      } else {
+        workspace.manifest.installConfig = workspace.manifest.installConfig || {};
+        workspace.manifest.installConfig.selfReferences = false;
+        workspace.manifest.dependencies.clear();
+        workspace.manifest.devDependencies.clear();
+        workspace.manifest.peerDependencies.clear();
+        workspace.manifest.scripts.clear();
       }
     }
 
-    // Lastly lets prune cache of items that are not needed
+    // And finally we need to resolve & link everything,
+    // and then update the cache with unused dependencies
 
-    const cacheFiles = readdirSync(cache.cwd);
-
-    for (const fileName of cacheFiles) {
-      const matches = fileName.match(/(.*)-.+/);
-
-      if (!matches || dependenciesToKeep.get(matches[1]) !== true) {
-        unlinkSync(`${cache.cwd}/${fileName}`);
+    const report = await StreamReport.start(
+      {
+        configuration,
+        json: this.json,
+        stdout: this.context.stdout,
+        includeLogs: true,
+      },
+      async (report: StreamReport) => {
+        await project.resolveEverything({ cache, report });
+        await project.linkEverything({ cache, report });
+        await project.cacheCleanup({ cache, report });
       }
-    }
+    );
 
-    console.log("Cache pruned for selected workspaces.");
+    return report.exitCode();
   }
 }
 
